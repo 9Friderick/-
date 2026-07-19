@@ -1,0 +1,12 @@
+{
+  "source": "hunter.qianxin.com",
+  "search": "ip=\"8.8.8.8\"",
+  "page_size": 10,
+  "fetched_at": "2026-07-19 10:30:00",
+  "total_results": 3,
+  "results": [
+    {"ip": "8.8.8.8", "port": 53, "domain": "dns.google", "host": "8.8.8.8", "title": "Google DNS", "protocol": "dns", "country": "US", "city": "Mountain View"},
+    {"ip": "8.8.8.8", "port": 443, "domain": "dns.google", "host": "dns.google", "title": "Google", "protocol": "https", "country": "US", "city": "Mountain View"},
+    {"ip": "8.8.8.8", "port": 80, "domain": "dns.google", "host": "dns.google", "title": "Google", "protocol": "http", "country": "US", "city": "Mountain View"}
+  ]
+}

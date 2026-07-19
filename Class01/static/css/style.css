@@ -1,0 +1,215 @@
+/* ===== 全局重置 ===== */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: #f0f2f5;
+    min-height: 100vh;
+    color: #333;
+}
+
+a {
+    text-decoration: none;
+    color: inherit;
+}
+
+ul {
+    list-style: none;
+}
+
+/* ===== 导航栏 ===== */
+.navbar {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: #fff;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 32px;
+    height: 60px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.nav-left {
+    display: flex;
+    align-items: center;
+}
+
+.brand {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+.nav-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.nav-welcome {
+    font-size: 14px;
+    opacity: 0.9;
+}
+
+.nav-link {
+    color: #fff;
+    font-size: 14px;
+    padding: 6px 14px;
+    border-radius: 4px;
+    transition: background-color 0.2s;
+}
+
+.nav-link:hover {
+    background-color: rgba(255, 255, 255, 0.15);
+}
+
+/* ===== 主容器 ===== */
+.container {
+    max-width: 680px;
+    margin: 48px auto;
+    padding: 0 20px;
+}
+
+/* ===== 卡片 ===== */
+.card {
+    background-color: #fff;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+    padding: 36px 40px;
+}
+
+.card h1 {
+    font-size: 24px;
+    margin-bottom: 20px;
+    color: #333;
+}
+
+.card p {
+    color: #666;
+    line-height: 1.6;
+}
+
+/* ===== 登录卡片 ===== */
+.card-login {
+    max-width: 420px;
+    margin: 0 auto;
+}
+
+/* ===== 表单 ===== */
+.form-group {
+    margin-bottom: 18px;
+}
+
+.form-group label {
+    display: block;
+    font-size: 14px;
+    font-weight: 600;
+    color: #555;
+    margin-bottom: 6px;
+}
+
+.form-group input {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1px solid #d9d9d9;
+    border-radius: 6px;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.form-group input:focus {
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
+}
+
+/* ===== 按钮 ===== */
+.btn {
+    display: inline-block;
+    padding: 10px 24px;
+    background-color: #667eea;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.btn:hover {
+    background-color: #5a6fd6;
+}
+
+.btn-block {
+    width: 100%;
+}
+
+.btn-danger {
+    background-color: #ff4d4f;
+}
+
+.btn-danger:hover {
+    background-color: #e04345;
+}
+
+/* ===== 操作区 ===== */
+.actions {
+    margin-top: 24px;
+}
+
+/* ===== 用户信息列表 ===== */
+.user-info {
+    margin-top: 16px;
+}
+
+.user-info h2 {
+    font-size: 18px;
+    color: #555;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.info-list li {
+    padding: 8px 0;
+    font-size: 15px;
+    border-bottom: 1px solid #fafafa;
+}
+
+.info-list li:last-child {
+    border-bottom: none;
+}
+
+.label {
+    display: inline-block;
+    min-width: 80px;
+    color: #888;
+    font-weight: 600;
+}
+
+/* ===== 提示消息 ===== */
+.alert {
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-bottom: 18px;
+    font-size: 14px;
+}
+
+.alert-error {
+    background-color: #fff2f0;
+    border: 1px solid #ffccc7;
+    color: #ff4d4f;
+}
+
+/* ===== 表单底部 ===== */
+.form-footer {
+    text-align: center;
+    margin-top: 18px;
+    font-size: 13px;
+    color: #999;
+}
