@@ -8,12 +8,18 @@
 - 全站 HTTPS 强制跳转
 - 随机生成 secret_key
 - 关闭 debug 模式
+
+新增功能：
+- SQLite 数据库存储注册用户
+- 用户注册（参数化查询，防 SQL 注入）
+- 用户搜索（参数化查询，防 SQL 注入）
 """
 
 import json
 import os
 import secrets
 import re
+import sqlite3
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -33,6 +39,11 @@ PASSWD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users_pa
 # HTTPS 证书路径
 CERT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cert.pem")
 KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "key.pem")
+
+# SQLite 数据库路径
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_DIR = os.path.join(BASE_DIR, "data")
+DB_PATH = os.path.join(DB_DIR, "users.db")
 
 # ============================================================
 # 用户数据库 — 注意：不包含密码字段！
@@ -100,10 +111,10 @@ def validate_password_strength(password: str) -> tuple[bool, str]:
 # ============================================================
 # 登录限流 — 防爆破
 # ============================================================
-LOGIN_ATTEMPTS: dict[str, list[datetime]] = {}  # key: "ip:username" -> [attempt_times]
-MAX_ATTEMPTS = 5          # 最多失败次数
-LOCKOUT_MINUTES = 15       # 锁定时间（分钟）
-CLEANUP_INTERVAL = 60      # 清理周期（秒）
+LOGIN_ATTEMPTS: dict[str, list[datetime]] = {}
+MAX_ATTEMPTS = 5
+LOCKOUT_MINUTES = 15
+CLEANUP_INTERVAL = 60
 _last_cleanup = datetime.now()
 
 
@@ -128,14 +139,13 @@ def cleanup_expired_attempts():
 
 
 def is_login_locked() -> tuple[bool, int]:
-    """检查登录是否被锁定，返回 (是否锁定, 剩余锁定秒数)"""
+    """检查登录是否被锁定"""
     cleanup_expired_attempts()
     key = get_login_key()
     now = datetime.now()
     cutoff = now - timedelta(minutes=LOCKOUT_MINUTES)
 
     attempts = LOGIN_ATTEMPTS.get(key, [])
-    # 只保留时间窗口内的记录
     recent = [t for t in attempts if t > cutoff]
     LOGIN_ATTEMPTS[key] = recent
 
@@ -158,11 +168,42 @@ def record_failed_attempt(username: str):
 
 
 # ============================================================
+# SQLite 数据库初始化
+# ============================================================
+def init_db():
+    """初始化 SQLite 数据库，创建 users 表并插入默认用户"""
+    os.makedirs(DB_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            email TEXT,
+            phone TEXT
+        )
+    """)
+    # 插入默认用户（INSERT OR IGNORE 防止重复）
+    c.execute("INSERT OR IGNORE INTO users (username, password, email, phone) VALUES (?, ?, ?, ?)",
+              ("admin", "admin123", "admin@example.com", "13800138000"))
+    c.execute("INSERT OR IGNORE INTO users (username, password, email, phone) VALUES (?, ?, ?, ?)",
+              ("alice", "alice2025", "alice@example.com", "13900139001"))
+    conn.commit()
+    conn.close()
+    print("  ✅ SQLite 数据库初始化完成")
+
+
+# ============================================================
 # Flask 初始化
 # ============================================================
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.debug = False
+
+# 启动时初始化数据库
+init_db()
+
 
 # ============================================================
 # HTTPS 强制跳转中间件
@@ -186,7 +227,28 @@ def index():
     user_info = None
     if username and username in USERS:
         user_info = USERS[username]
-    return render_template("index.html", username=username, user=user_info)
+
+    # 处理搜索
+    keyword = request.args.get("keyword", "")
+    search_results = None
+    if keyword:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        # 使用参数化查询防 SQL 注入
+        sql = "SELECT id, username, email, phone FROM users WHERE username LIKE ? OR email LIKE ?"
+        like_param = f"%{keyword}%"
+        print(f"  [SQL] {sql}  参数: like_param='{like_param}'")
+        try:
+            c.execute(sql, (like_param, like_param))
+            search_results = [dict(row) for row in c.fetchall()]
+        except Exception as e:
+            print(f"  [SQL ERROR] {e}")
+            search_results = []
+        conn.close()
+
+    return render_template("index.html", username=username, user=user_info,
+                           keyword=keyword, search_results=search_results)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -220,7 +282,9 @@ def login():
                 return render_template("login.html", error=f"登录过于频繁，请稍后再试")
             return render_template("login.html", error=f"用户名或密码错误（还可尝试 {remaining} 次）")
 
-    return render_template("login.html")
+    # 从注册页跳转过来的成功提示
+    msg = request.args.get("msg", "")
+    return render_template("login.html", msg=msg)
 
 
 @app.route("/logout")
@@ -228,6 +292,78 @@ def logout():
     """登出：清除 session 后重定向"""
     session.clear()
     return redirect(url_for("index"))
+
+
+# ============================================================
+# 新增：用户注册
+# ============================================================
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    """注册页面：GET 显示表单，POST 处理注册"""
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        email = request.form.get("email", "").strip()
+        phone = request.form.get("phone", "").strip()
+
+        if not username or not password:
+            return render_template("register.html", error="用户名和密码不能为空")
+
+        # 使用参数化查询防 SQL 注入
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        sql = "INSERT INTO users (username, password, email, phone) VALUES (?, ?, ?, ?)"
+        print(f"  [SQL] {sql}  参数: username='{username}'")
+        try:
+            c.execute(sql, (username, password, email, phone))
+            conn.commit()
+            print(f"  ✅ 用户 {username} 注册成功")
+            conn.close()
+            return redirect(url_for("login", msg="注册成功，请登录"))
+        except sqlite3.IntegrityError as e:
+            conn.close()
+            return render_template("register.html", error=f"用户名 '{username}' 已存在")
+        except Exception as e:
+            conn.close()
+            return render_template("register.html", error=f"注册失败: {e}")
+
+    return render_template("register.html")
+
+
+# ============================================================
+# 新增：搜索用户（GET）
+# ============================================================
+@app.route("/search")
+def search():
+    """搜索用户：通过 URL 参数 keyword 搜索"""
+    keyword = request.args.get("keyword", "")
+
+    if not keyword:
+        return redirect(url_for("index"))
+
+    # 使用参数化查询防 SQL 注入
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    sql = "SELECT id, username, email, phone FROM users WHERE username LIKE ? OR email LIKE ?"
+    like_param = f"%{keyword}%"
+    print(f"  [SQL] {sql}  参数: like_param='{like_param}'")
+    results = []
+    try:
+        c.execute(sql, (like_param, like_param))
+        results = [dict(row) for row in c.fetchall()]
+    except Exception as e:
+        print(f"  [SQL ERROR] {e}")
+
+    conn.close()
+
+    username = session.get("username")
+    user_info = None
+    if username and username in USERS:
+        user_info = USERS[username]
+
+    return render_template("index.html", username=username, user=user_info,
+                           keyword=keyword, search_results=results)
 
 
 # ============================================================

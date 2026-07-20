@@ -4,6 +4,10 @@
 <div class="card card-login">
     <h1>用户登录</h1>
 
+    {% if msg %}
+        <div class="alert alert-success">{{ msg }}</div>
+    {% endif %}
+
     {% if error %}
         <div class="alert alert-error">{{ error }}</div>
     {% endif %}
@@ -20,6 +24,6 @@
         <button type="submit" class="btn btn-primary btn-block">登录</button>
     </form>
 
-    <p class="form-footer">还没有账号？请联系管理员</p>
+    <p class="form-footer">还没有账号？<a href="/register" style="color:#667eea;">立即注册</a></p>
 </div>
 {% endblock %}
