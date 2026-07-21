@@ -13,6 +13,7 @@
 - SQLite 数据库存储注册用户
 - 用户注册（参数化查询，防 SQL 注入）
 - 用户搜索（参数化查询，防 SQL 注入）
+- 用户头像上传（不校验文件类型，保留原始文件名）
 """
 
 import json
@@ -20,10 +21,12 @@ import os
 import secrets
 import re
 import sqlite3
+import uuid
+import imghdr
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, session, url_for, abort
+from flask import Flask, render_template, request, redirect, session, url_for, abort, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # ============================================================
@@ -44,6 +47,12 @@ KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "key.pem")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DB_DIR, "users.db")
+
+# 上传文件配置
+UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads")
+MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "bmp", "webp", "svg"}
+MAX_AVATAR_SIZE = 2 * 1024 * 1024  # 2MB
 
 # ============================================================
 # 用户数据库 — 注意：不包含密码字段！
@@ -168,6 +177,39 @@ def record_failed_attempt(username: str):
 
 
 # ============================================================
+# 上传文件安全校验函数
+# ============================================================
+def allowed_file(filename: str) -> bool:
+    """校验文件扩展名是否在允许的白名单内"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def is_valid_image(filepath: str) -> bool:
+    """通过读取文件头校验是否为真实图片"""
+    try:
+        return imghdr.what(filepath) is not None
+    except:
+        return False
+
+
+def get_secure_filename(filename: str) -> str:
+    """生成安全的文件名：UUID + 合法扩展名（防止路径穿越、文件名覆盖和恶意文件名）
+
+    修复 V-02: UUID 命名防路径穿越
+    修复 V-06: 文件存在检测防文件名覆盖
+    """
+    ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else 'png'
+    if ext not in ALLOWED_EXTENSIONS:
+        ext = 'png'
+    # 循环检查文件是否存在，避免覆盖已有文件
+    while True:
+        name = f"{uuid.uuid4().hex}.{ext}"
+        filepath = os.path.join(UPLOAD_DIR, name)
+        if not os.path.exists(filepath):
+            return name
+
+
+# ============================================================
 # SQLite 数据库初始化
 # ============================================================
 def init_db():
@@ -200,6 +242,7 @@ def init_db():
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.debug = False
+app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
 # 启动时初始化数据库
 init_db()
@@ -364,6 +407,59 @@ def search():
 
     return render_template("index.html", username=username, user=user_info,
                            keyword=keyword, search_results=results)
+
+
+# ============================================================
+# 上传功能 — 安全加固版（5层防御）
+# ============================================================
+@app.route("/upload", methods=["GET", "POST"])
+def upload():
+    """头像上传：GET 显示表单，POST 处理文件上传（已做安全加固）"""
+    if "username" not in session:
+        return redirect(url_for("login"))
+
+    if request.method == "POST":
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        file = request.files.get("file")
+        if file is None or file.filename == "":
+            return render_template("upload.html", error="请选择要上传的文件")
+
+        # === 第1层防御：扩展名白名单校验 ===
+        if not allowed_file(file.filename):
+            return render_template("upload.html", error="不支持的文件类型，仅允许图片文件（jpg/png/gif/bmp/webp/svg）")
+
+        # === 第2层防御：应用层文件大小校验 ===
+        file.seek(0, os.SEEK_END)
+        file_size = file.tell()
+        file.seek(0)
+        if file_size > MAX_AVATAR_SIZE:
+            return render_template("upload.html", error=f"文件大小超过限制（最大 {MAX_AVATAR_SIZE // 1024 // 1024}MB）")
+
+        # === 第3层防御：UUID重命名（防路径穿越、防恶意文件名） ===
+        safe_filename = get_secure_filename(file.filename)
+        filepath = os.path.join(UPLOAD_DIR, safe_filename)
+
+        # === 第3层防御延伸：路径穿越终极校验（符号链接/编码绕过） ===
+        real_dir = os.path.realpath(UPLOAD_DIR)
+        real_path = os.path.realpath(filepath)
+        if os.path.commonpath([real_dir]) != os.path.commonpath([real_dir, real_path]):
+            # 如果解析后的路径不在上传目录内，拒绝保存
+            return render_template("upload.html", error="非法的文件路径")
+
+        file.save(filepath)
+
+        # === 第4层防御：真实图片文件头检测 ===
+        if not is_valid_image(filepath):
+            os.remove(filepath)
+            return render_template("upload.html", error="文件不是有效的图片文件，请上传真实图片")
+
+        # === 第5层防御：移除文件可执行权限 ===
+        os.chmod(filepath, 0o644)
+
+        file_url = url_for("static", filename=f"uploads/{safe_filename}")
+        return render_template("upload.html", success=True, file_url=file_url, filename=safe_filename)
+
+    return render_template("upload.html")
 
 
 # ============================================================
