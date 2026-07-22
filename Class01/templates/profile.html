@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h1>个人中心</h1>
+
+    {% if error == 'invalid_amount' %}
+        <div class="alert alert-error">充值金额无效：必须为大于0的数字，单笔最高10,000元</div>
+    {% elif error %}
+        <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+
+    {% if user %}
+        <div class="user-info">
+            <h2>用户资料</h2>
+            <ul class="info-list">
+                <li><span class="label">ID：</span>{{ user.id }}</li>
+                <li><span class="label">用户名：</span>{{ user.username }}</li>
+                <li><span class="label">邮箱：</span>{{ user.email or '未设置' }}</li>
+                <li><span class="label">手机：</span>{{ user.phone or '未设置' }}</li>
+                <li><span class="label">角色：</span>{{ user.role }}</li>
+                <li><span class="label">余额：</span>¥{{ user.balance_display }}</li>
+            </ul>
+        </div>
+
+        <div class="recharge-section">
+            <h2>充值</h2>
+            <form method="post" action="/recharge" class="recharge-form">
+                <!-- P0-4: 不传递隐藏的 user_id，充值路由从 session 获取 -->
+                <div class="form-group">
+                    <label for="amount">充值金额（元）</label>
+                    <input type="number" name="amount" id="amount" class="search-input" placeholder="请输入充值金额（1 ~ 10000）" min="0.01" step="0.01" required>
+                </div>
+                <button type="submit" class="btn">充值</button>
+            </form>
+        </div>
+
+        <div class="actions">
+            <a href="/" class="btn">返回首页</a>
+        </div>
+    {% else %}
+        <div class="actions">
+            <a href="/" class="btn">返回首页</a>
+        </div>
+    {% endif %}
+</div>
+{% endblock %}

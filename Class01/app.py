@@ -17,6 +17,7 @@
 """
 
 import json
+import math
 import os
 import secrets
 import re
@@ -56,6 +57,7 @@ MAX_AVATAR_SIZE = 2 * 1024 * 1024  # 2MB
 
 # ============================================================
 # 用户数据库 — 注意：不包含密码字段！
+# 余额以"分"为单位存储（整数），避免浮点数精度损失
 # ============================================================
 USERS = {
     "admin": {
@@ -63,16 +65,57 @@ USERS = {
         "role": "admin",
         "email": "admin@example.com",
         "phone": "13800138000",
-        "balance": 99999,
+        "balance": 9999900,  # 99999.00 元 = 9999900 分
     },
     "alice": {
         "username": "alice",
         "role": "user",
         "email": "alice@example.com",
         "phone": "13900139001",
-        "balance": 100,
+        "balance": 10000,  # 100.00 元 = 10000 分
     },
 }
+
+
+# ============================================================
+# 登录校验装饰器 — 所有需要登录的接口必须使用此装饰器
+# ============================================================
+def login_required(f):
+    """登录校验装饰器：未登录用户重定向到登录页"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# ============================================================
+# 余额格式化函数 — 将"分"转换为"元.角分"显示
+# ============================================================
+def format_balance(cents: int) -> str:
+    """将整数分格式化为元（保留两位小数），如 10000 → '100.00'"""
+    return f"{cents / 100:.2f}"
+
+
+def parse_yuan_to_cents(yuan_str: str) -> int | None:
+    """将用户输入的元转换为分，格式非法返回 None，超上限或负数也返回 None"""
+    try:
+        amount = float(yuan_str)
+    except (ValueError, TypeError):
+        return None
+    # P0-5: 禁止负数充值
+    if amount <= 0:
+        return None
+    # P0-6: 禁止 inf / nan 等特殊浮点值
+    if not math.isfinite(amount):
+        return None
+    # P0-6: 单笔充值上限 10000 元 = 1000000 分
+    MAX_RECHARGE_CENTS = 1000000
+    cents = int(round(amount * 100))
+    if cents > MAX_RECHARGE_CENTS:
+        return None
+    return cents
 
 
 # ============================================================
@@ -226,11 +269,19 @@ def init_db():
             phone TEXT
         )
     """)
-    # 插入默认用户（INSERT OR IGNORE 防止重复）
+    # 插入/更新默认用户：旧版数据库可能存有明文密码，此处用哈希覆盖
+    # P0-7: 密码使用 werkzeug.security 哈希后存储，杜绝明文
+    default_admin_pwd = generate_password_hash("admin123")
+    default_alice_pwd = generate_password_hash("alice2025")
     c.execute("INSERT OR IGNORE INTO users (username, password, email, phone) VALUES (?, ?, ?, ?)",
-              ("admin", "admin123", "admin@example.com", "13800138000"))
+              ("admin", default_admin_pwd, "admin@example.com", "13800138000"))
     c.execute("INSERT OR IGNORE INTO users (username, password, email, phone) VALUES (?, ?, ?, ?)",
-              ("alice", "alice2025", "alice@example.com", "13900139001"))
+              ("alice", default_alice_pwd, "alice@example.com", "13900139001"))
+    # 迁移已有记录的密码为哈希（防止旧版 INSERT OR IGNORE 遗留的明文密码）
+    c.execute("UPDATE users SET password = ? WHERE username = ? AND password NOT LIKE 'scrypt:%' AND password NOT LIKE 'pbkdf2:%'",
+              (default_admin_pwd, "admin"))
+    c.execute("UPDATE users SET password = ? WHERE username = ? AND password NOT LIKE 'scrypt:%' AND password NOT LIKE 'pbkdf2:%'",
+              (default_alice_pwd, "alice"))
     conn.commit()
     conn.close()
     print("  ✅ SQLite 数据库初始化完成")
@@ -269,12 +320,14 @@ def index():
     username = session.get("username")
     user_info = None
     if username and username in USERS:
-        user_info = USERS[username]
+        # P1-8: 将余额从"分"转为"元"显示
+        user_info = dict(USERS[username])
+        user_info["balance_display"] = format_balance(user_info["balance"])
 
-    # 处理搜索
+    # 处理搜索（P1-9: 仅已登录用户可搜索）
     keyword = request.args.get("keyword", "")
     search_results = None
-    if keyword:
+    if keyword and session.get("user_id"):
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
@@ -289,6 +342,9 @@ def index():
             print(f"  [SQL ERROR] {e}")
             search_results = []
         conn.close()
+    elif keyword and not session.get("user_id"):
+        # 未登录用户尝试搜索，重定向到登录页
+        return redirect(url_for("login"))
 
     return render_template("index.html", username=username, user=user_info,
                            keyword=keyword, search_results=search_results)
@@ -306,24 +362,92 @@ def login():
         if locked:
             return render_template("login.html", error=f"登录过于频繁，请 {remaining} 秒后再试")
 
-        # 验证用户是否存在
-        if username not in USERS:
-            record_failed_attempt(username)
-            return render_template("login.html", error="用户名或密码错误")
+        # ---- 鉴权流程 ----
+        # 1) 优先查 SQLite（注册用户的密码已哈希存储在 users 表）
+        # 2) 如果 SQLite 中无此用户或密码不符，回退到 users_passwd.json（admin/alice 的旧密码文件）
+        # ---- P0-7: 统一密码校验，无论存储方式如何 ----
+        authenticated = False
+        user_id = None
 
-        # 验证密码（bcrypt 哈希比对）
-        if verify_password(username, password):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        try:
+            c.execute("SELECT id, password FROM users WHERE username = ?", (username,))
+            row = c.fetchone()
+            if row:
+                user_id = row[0]
+                stored_hash = row[1]
+                # 如果存储的是 werkzeug 哈希（以常见哈希前缀开头），用 check_password_hash
+                if stored_hash.startswith(('pbkdf2:', 'scrypt:', '$2', '$5', '$6')):
+                    authenticated = check_password_hash(stored_hash, password)
+                else:
+                    # 兼容旧版明文数据（init_db 在修复前写入的明文密码）
+                    authenticated = (stored_hash == password)
+        except Exception as e:
+            print(f"  [SQL ERROR] {e}")
+        conn.close()
+
+        # 如果 SQLite 验证未通过，尝试旧密码文件（admin/alice 在 users_passwd.json 中的哈希）
+        if not authenticated and username in USERS:
+            authenticated = verify_password(username, password)
+            # 从 SQLite 获取 user_id
+            if authenticated:
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                try:
+                    c.execute("SELECT id FROM users WHERE username = ?", (username,))
+                    row = c.fetchone()
+                    if row:
+                        user_id = row[0]
+                except:
+                    pass
+                conn.close()
+
+        if authenticated and user_id:
             session["username"] = username
+            session["user_id"] = user_id
             session.permanent = True
             app.permanent_session_lifetime = timedelta(hours=8)
-            user_info = USERS[username]
-            return render_template("index.html", username=username, user=user_info)
+
+            # P0-7: 登录成功后，如果数据库仍存有明文密码，升级为哈希
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("SELECT password, email, phone FROM users WHERE id = ?", (user_id,))
+                row = c.fetchone()
+                if row:
+                    # 密码升级
+                    if not row[0].startswith(('pbkdf2:', 'scrypt:', '$2', '$5', '$6')):
+                        hashed = generate_password_hash(password)
+                        c.execute("UPDATE users SET password = ? WHERE id = ?", (hashed, user_id))
+                        conn.commit()
+                        print(f"  🔐 用户 {username} 密码已从明文升级为哈希")
+                    # 用户同步：确保 USERS 字典中存在该用户记录（充值/余额功能依赖它）
+                    if username not in USERS:
+                        USERS[username] = {
+                            "username": username,
+                            "role": "user",
+                            "email": row[1] or "",
+                            "phone": row[2] or "",
+                            "balance": 0,
+                        }
+                        print(f"  ✅ 用户 {username} 已同步到 USERS 字典")
+                conn.close()
+            except Exception as e:
+                print(f"  [登录后处理失败] {e}")
+            user_info = USERS.get(username)
+
+            # P1-8: 将余额从"分"转为"元"显示
+            user_info_display = None
+            if user_info:
+                user_info_display = dict(user_info)
+                user_info_display["balance_display"] = format_balance(user_info["balance"])
+
+            return render_template("index.html", username=username, user=user_info_display)
         else:
+            # P2-10: 登录失败统一返回"用户名或密码错误"，不区分具体原因
             record_failed_attempt(username)
-            remaining = MAX_ATTEMPTS - len(LOGIN_ATTEMPTS.get(get_login_key(), []))
-            if remaining <= 0:
-                return render_template("login.html", error=f"登录过于频繁，请稍后再试")
-            return render_template("login.html", error=f"用户名或密码错误（还可尝试 {remaining} 次）")
+            return render_template("login.html", error="用户名或密码错误")
 
     # 从注册页跳转过来的成功提示
     msg = request.args.get("msg", "")
@@ -352,14 +476,25 @@ def register():
         if not username or not password:
             return render_template("register.html", error="用户名和密码不能为空")
 
+        # P0-7: 密码使用 werkzeug.security 哈希后存储，杜绝明文
+        hashed_password = generate_password_hash(password)
+
         # 使用参数化查询防 SQL 注入
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         sql = "INSERT INTO users (username, password, email, phone) VALUES (?, ?, ?, ?)"
         print(f"  [SQL] {sql}  参数: username='{username}'")
         try:
-            c.execute(sql, (username, password, email, phone))
+            c.execute(sql, (username, hashed_password, email, phone))
             conn.commit()
+            # 将新用户加入 USERS 字典（初始余额 0 分），使其余额可被充值和展示
+            USERS[username] = {
+                "username": username,
+                "role": "user",
+                "email": email or "",
+                "phone": phone or "",
+                "balance": 0,  # 初始余额 0 分 = 0.00 元
+            }
             print(f"  ✅ 用户 {username} 注册成功")
             conn.close()
             return redirect(url_for("login", msg="注册成功，请登录"))
@@ -377,8 +512,9 @@ def register():
 # 新增：搜索用户（GET）
 # ============================================================
 @app.route("/search")
+@login_required
 def search():
-    """搜索用户：通过 URL 参数 keyword 搜索"""
+    """搜索用户：通过 URL 参数 keyword 搜索（需登录）"""
     keyword = request.args.get("keyword", "")
 
     if not keyword:
@@ -403,7 +539,8 @@ def search():
     username = session.get("username")
     user_info = None
     if username and username in USERS:
-        user_info = USERS[username]
+        user_info = dict(USERS[username])
+        user_info["balance_display"] = format_balance(user_info["balance"])
 
     return render_template("index.html", username=username, user=user_info,
                            keyword=keyword, search_results=results)
@@ -460,6 +597,85 @@ def upload():
         return render_template("upload.html", success=True, file_url=file_url, filename=safe_filename)
 
     return render_template("upload.html")
+
+
+# ============================================================
+# 新增：个人中心
+# ============================================================
+@app.route("/profile")
+@login_required
+def profile():
+    """个人中心：从 session 获取当前登录用户身份，查询资料"""
+    # P0-1/P0-2: 只从 session["user_id"] 获取身份，拒绝 URL 参数
+    user_id = session["user_id"]
+
+    # 查询 SQLite 数据库获取用户信息
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    user_row = None
+    try:
+        c.execute("SELECT id, username, email, phone FROM users WHERE id = ?", (user_id,))
+        user_row = c.fetchone()
+    except Exception as e:
+        print(f"  [SQL ERROR] {e}")
+    conn.close()
+
+    if user_row is None:
+        return render_template("profile.html", error="未找到该用户", user=None)
+
+    user_data = dict(user_row)
+
+    # 从 USERS 字典补充余额和角色信息
+    username = user_data["username"]
+    if username in USERS:
+        user_data["balance"] = USERS[username].get("balance", 0)
+        user_data["role"] = USERS[username].get("role", "user")
+    else:
+        user_data["balance"] = 0
+        user_data["role"] = "user"
+
+    # P1-8: 余额从"分"格式化为"元"显示
+    user_data["balance_display"] = format_balance(user_data["balance"])
+
+    return render_template("profile.html", user=user_data, error=None)
+
+
+@app.route("/recharge", methods=["POST"])
+@login_required
+def recharge():
+    """充值：从 session 获取当前用户身份，不信任表单传入的 user_id"""
+    # P0-3/P0-4: 只从 session["user_id"] 获取身份，拒绝表单传入的 user_id
+    user_id = session["user_id"]
+    amount_str = request.form.get("amount", "0")
+
+    # P0-5/P0-6/P1-8: 金额校验（正数、上限、格式），转换为"分"存储
+    cents = parse_yuan_to_cents(amount_str)
+    if cents is None:
+        # 金额格式非法/负数/超上限，重定向到个人中心并携带错误信息
+        # 使用 flash 或 URL 参数传递错误
+        return redirect(f"/profile?error=invalid_amount")
+
+    # 查询对应的用户名
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    username = None
+    try:
+        c.execute("SELECT username FROM users WHERE id = ?", (user_id,))
+        row = c.fetchone()
+        if row:
+            username = row[0]
+    except Exception as e:
+        print(f"  [SQL ERROR] {e}")
+    conn.close()
+
+    if username and username in USERS:
+        # P1-8: 余额以"分"为单位存储（整数）
+        USERS[username]["balance"] = USERS[username].get("balance", 0) + cents
+        yuan = format_balance(USERS[username]["balance"])
+        print(f"  ✅ 用户 {username} 充值 {cents} 分，当前余额 {yuan} 元")
+
+    return redirect(f"/profile")
 
 
 # ============================================================
