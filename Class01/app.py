@@ -679,6 +679,63 @@ def recharge():
 
 
 # ============================================================
+# 新增：动态页面加载（page route）— 已修复路径遍历漏洞
+# ============================================================
+@app.route("/page")
+@login_required
+def page():
+    """动态页面加载：从 URL 参数获取页面名称，安全读取 pages/ 目录下的文件"""
+    name = request.args.get("name", "")
+
+    if not name:
+        return render_template("index.html", page_content="页面不存在",
+                               username=session.get("username"))
+
+    # 修复LFI：限制文件读取只能在 pages/ 目录内
+    # Step 1: 获取 pages/ 目录的绝对路径
+    base_dir = os.path.abspath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
+    )
+
+    # Step 2: 拼接用户输入后用 os.path.realpath 解析真实路径（去除 ../）
+    user_path = os.path.join(base_dir, name)
+    real_path = os.path.realpath(user_path)
+
+    # Step 3: 校验解析后的路径必须在 pages/ 目录范围内
+    if not real_path.startswith(base_dir):
+        content = "页面不存在"
+    else:
+        content = None
+        # 先尝试精确路径
+        if os.path.exists(real_path):
+            try:
+                with open(real_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except:
+                content = "页面不存在"
+        else:
+            # 尝试加上 .html 后缀
+            real_path_html = real_path + ".html"
+            if os.path.exists(real_path_html):
+                try:
+                    with open(real_path_html, "r", encoding="utf-8") as f:
+                        content = f.read()
+                except:
+                    content = "页面不存在"
+            else:
+                content = "页面不存在"
+
+    username = session.get("username")
+    user_info = None
+    if username and username in USERS:
+        user_info = dict(USERS[username])
+        user_info["balance_display"] = format_balance(user_info["balance"])
+
+    return render_template("index.html", page_content=content,
+                           username=username, user=user_info)
+
+
+# ============================================================
 # 启动
 # ============================================================
 if __name__ == "__main__":
