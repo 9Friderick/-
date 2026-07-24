@@ -52,7 +52,7 @@ DB_PATH = os.path.join(DB_DIR, "users.db")
 # 上传文件配置
 UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads")
 MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "bmp", "webp", "svg"}
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
 MAX_AVATAR_SIZE = 2 * 1024 * 1024  # 2MB
 
 # ============================================================
@@ -86,6 +86,36 @@ def login_required(f):
     def decorated_function(*args, **kwargs):
         if "user_id" not in session:
             return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# ============================================================
+# CSRF 防护 — 基于 Session 的 Token 校验
+# ============================================================
+def generate_csrf_token() -> str:
+    """生成或获取当前会话的 CSRF Token"""
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_hex(32)
+    return session["csrf_token"]
+
+
+def validate_csrf() -> bool:
+    """校验请求中的 CSRF Token 是否与会话中的一致"""
+    token = request.form.get("csrf_token", "")
+    expected = session.get("csrf_token")
+    if not expected or not token:
+        return False
+    return token == expected
+
+
+def csrf_required(f):
+    """CSRF 校验装饰器：Token 不匹配时返回 400"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if request.method == "POST":
+            if not validate_csrf():
+                return "CSRF Token 无效或缺失", 400
         return f(*args, **kwargs)
     return decorated_function
 
@@ -300,6 +330,15 @@ init_db()
 
 
 # ============================================================
+# 上下文处理器 — 所有模板自动获得 csrf_token 变量
+# ============================================================
+@app.context_processor
+def inject_csrf_token():
+    """向所有模板注入 csrf_token 变量"""
+    return dict(csrf_token=generate_csrf_token())
+
+
+# ============================================================
 # HTTPS 强制跳转中间件
 # ============================================================
 @app.before_request
@@ -354,6 +393,9 @@ def index():
 def login():
     """登录：支持 GET 显示表单，POST 验证凭据"""
     if request.method == "POST":
+        # CSRF-03: 登录表单 CSRF 校验
+        if not validate_csrf():
+            return "CSRF Token 无效或缺失", 400
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
 
@@ -468,6 +510,9 @@ def logout():
 def register():
     """注册页面：GET 显示表单，POST 处理注册"""
     if request.method == "POST":
+        # CSRF-04: 注册表单 CSRF 校验
+        if not validate_csrf():
+            return "CSRF Token 无效或缺失", 400
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         email = request.form.get("email", "").strip()
@@ -556,6 +601,9 @@ def upload():
         return redirect(url_for("login"))
 
     if request.method == "POST":
+        # CSRF-05: 上传表单 CSRF 校验
+        if not validate_csrf():
+            return "CSRF Token 无效或缺失", 400
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         file = request.files.get("file")
         if file is None or file.filename == "":
@@ -563,7 +611,7 @@ def upload():
 
         # === 第1层防御：扩展名白名单校验 ===
         if not allowed_file(file.filename):
-            return render_template("upload.html", error="不支持的文件类型，仅允许图片文件（jpg/png/gif/bmp/webp/svg）")
+            return render_template("upload.html", error="不支持的文件类型，仅允许图片文件（jpg/png/gif/bmp/webp）")
 
         # === 第2层防御：应用层文件大小校验 ===
         file.seek(0, os.SEEK_END)
@@ -645,6 +693,9 @@ def profile():
 @login_required
 def recharge():
     """充值：从 session 获取当前用户身份，不信任表单传入的 user_id"""
+    # CSRF-02: 充值表单 CSRF 校验
+    if not validate_csrf():
+        return "CSRF Token 无效或缺失", 400
     # P0-3/P0-4: 只从 session["user_id"] 获取身份，拒绝表单传入的 user_id
     user_id = session["user_id"]
     amount_str = request.form.get("amount", "0")
@@ -725,6 +776,15 @@ def page():
             else:
                 content = "页面不存在"
 
+    # XSS-02: 防御性过滤 — 移除 <script> 标签及事件处理器（即使 pages/ 受控）
+    if content and content != "页面不存在":
+        # 移除 <script>...</script> 块
+        content = re.sub(r'<script[^>]*>.*?</script>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        # 移除 on* 事件处理器属性（onclick, onload, onerror 等）
+        content = re.sub(r'\son\w+\s*=\s*["\'][^"\']*["\']', '', content, flags=re.IGNORECASE)
+        # 移除 javascript: 伪协议链接
+        content = re.sub(r'javascript\s*:\s*', '', content, flags=re.IGNORECASE)
+
     username = session.get("username")
     user_info = None
     if username and username in USERS:
@@ -733,6 +793,53 @@ def page():
 
     return render_template("index.html", page_content=content,
                            username=username, user=user_info)
+
+
+# ============================================================
+# 新增：修改密码
+# ============================================================
+@app.route("/change-password", methods=["POST"])
+@login_required
+def change_password():
+    """修改密码：从表单接收 username 和 new_password，直接更新（不验证原密码）"""
+    # CSRF-01: 修改密码表单 CSRF 校验
+    if not validate_csrf():
+        return "CSRF Token 无效或缺失", 400
+    username = request.form.get("username", "").strip()
+    new_password = request.form.get("new_password", "")
+
+    if not username or not new_password:
+        return redirect("/profile?error=password_empty")
+
+    # 使用 werkzeug.security 哈希后存储
+    hashed_password = generate_password_hash(new_password)
+
+    # 更新 SQLite 数据库中的密码
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE users SET password = ? WHERE username = ?",
+                  (hashed_password, username))
+        conn.commit()
+        affected = c.rowcount
+        print(f"  🔐 用户 {username} 密码已修改（影响 {affected} 行）")
+    except Exception as e:
+        print(f"  [SQL ERROR] {e}")
+    conn.close()
+
+    # 如果该用户在 USERS 字典中存在且密码哈希文件有记录，一同更新
+    if username in USERS:
+        try:
+            hashes = load_password_hashes()
+            if username in hashes:
+                hashes[username] = hashed_password
+                with open(PASSWD_FILE, "w") as f:
+                    json.dump(hashes, f, indent=2)
+                print(f"  🔐 用户 {username} 密码哈希文件已同步更新")
+        except Exception as e:
+            print(f"  [同步密码文件失败] {e}")
+
+    return redirect("/profile")
 
 
 # ============================================================

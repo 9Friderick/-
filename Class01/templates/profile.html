@@ -6,6 +6,8 @@
 
     {% if error == 'invalid_amount' %}
         <div class="alert alert-error">充值金额无效：必须为大于0的数字，单笔最高10,000元</div>
+    {% elif error == 'password_empty' %}
+        <div class="alert alert-error">用户名和密码不能为空</div>
     {% elif error %}
         <div class="alert alert-error">{{ error }}</div>
     {% endif %}
@@ -26,6 +28,7 @@
         <div class="recharge-section">
             <h2>充值</h2>
             <form method="post" action="/recharge" class="recharge-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <!-- P0-4: 不传递隐藏的 user_id，充值路由从 session 获取 -->
                 <div class="form-group">
                     <label for="amount">充值金额（元）</label>
@@ -44,4 +47,24 @@
         </div>
     {% endif %}
 </div>
+
+<!-- 修改密码 -->
+{% if user %}
+<div class="card card-password">
+    <h2>修改密码</h2>
+    <form method="post" action="/change-password" class="password-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="username" value="{{ user.username }}">
+        <div class="form-group">
+            <label for="new_password">新密码</label>
+            <input type="password" name="new_password" id="new_password" class="search-input" placeholder="请输入新密码" required>
+        </div>
+        <div class="form-group">
+            <label for="confirm_password">确认密码</label>
+            <input type="password" name="confirm_password" id="confirm_password" class="search-input" placeholder="请再次输入新密码" required>
+        </div>
+        <button type="submit" class="btn">修改密码</button>
+    </form>
+</div>
+{% endif %}
 {% endblock %}

@@ -372,3 +372,20 @@ ul {
     font-size: 13px;
     color: #999;
 }
+
+/* ===== 修改密码区域 ===== */
+.card-password {
+    margin-top: 24px;
+}
+
+.card-password h2 {
+    font-size: 18px;
+    color: #555;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.password-form {
+    max-width: 320px;
+}
